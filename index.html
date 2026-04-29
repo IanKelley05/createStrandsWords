@@ -11,7 +11,8 @@
         h2 { margin-top: 0; }
         
         .input-wrapper { display: flex; gap: 8px; margin-bottom: 10px; align-items: stretch; }
-        input[type="text"] { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; text-transform: uppercase; transition: background-color 0.3s;}
+        input[type="text"], select { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; transition: background-color 0.3s; font-family: inherit;}
+        input[type="text"] { text-transform: uppercase; }
         
         .word-list { margin-bottom: 20px; }
         button { background: #4f46e5; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
@@ -56,8 +57,19 @@
         
         <div class="word-list" id="themeWordsList">
             <label>Theme Words:</label>
-            </div>
+        </div>
         <button onclick="addWordInput()">+ Add Word</button>
+
+        <div style="margin-top: 25px; margin-bottom: 15px;">
+            <label>Difficulty / Clumpiness:</label>
+            <div class="input-wrapper">
+                <select id="difficulty">
+                    <option value="hard">Hard (Normal - Allowed to intertwine & snake diagonally)</option>
+                    <option value="medium">Medium (No Crossing - Diagonals allowed but lines cannot intersect)</option>
+                    <option value="easy">Easy (Orthogonal Only - Blocky distinct zones, no diagonals)</option>
+                </select>
+            </div>
+        </div>
 
         <div style="margin-top: 30px;">
             <div class="counter" id="letterCounter">Letters remaining: 48</div>
@@ -81,12 +93,10 @@
 </div>
 
 <script>
-    // --- Rainbow Colors Palette ---
     const rainbowColors = [
         '#ffadad', '#ffd6a5', '#fdffb6', '#caffbf', '#9bf6ff', '#a0c4ff', '#bdb2ff', '#ffc6ff', '#e0e0e0'
     ];
 
-    // --- UI Logic ---
     const list = document.getElementById('themeWordsList');
     const counter = document.getElementById('letterCounter');
     const generateBtn = document.getElementById('generateBtn');
@@ -147,37 +157,68 @@
         updateInputColors(); 
     }
 
-    // Initialize with 5 empty inputs
     for(let i=0; i<5; i++) addWordInput();
 
     document.addEventListener('input', (e) => {
         if(e.target.classList.contains('word-input')) updateCount();
     });
 
-    // --- Upgraded Backtracking Algorithm ---
+    // --- Core Algorithm Logic ---
     const ROWS = 8, COLS = 6, N = 48;
-
-    function getNeighbors(index) {
-        const r = Math.floor(index / COLS);
-        const c = index % COLS;
-        const neighbors = [];
-        for (let dr of [-1, 0, 1]) {
-            for (let dc of [-1, 0, 1]) {
-                if (dr === 0 && dc === 0) continue;
-                const nr = r + dr, nc = c + dc;
-                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
-                    neighbors.push(nr * COLS + nc);
-                }
-            }
-        }
-        return neighbors;
-    }
 
     function shuffleArray(array) {
         for (let i = array.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [array[i], array[j]] = [array[j], array[i]];
         }
+    }
+
+    // Evaluates if two adjacent cells can connect under current difficulty rules
+    function canConnect(pos1, pos2, crossings, difficulty) {
+        const pr = Math.floor(pos1 / COLS);
+        const pc = pos1 % COLS;
+        const nr = Math.floor(pos2 / COLS);
+        const nc = pos2 % COLS;
+        
+        const isDiag = Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1;
+        
+        if (difficulty === 'easy') return !isDiag; // No diagonals at all
+        if (difficulty === 'hard') return true;    // Anything goes
+        
+        // Medium Mode: Allow diagonal, but block visual intersections
+        if (!isDiag) return true;
+        
+        const cr = Math.min(pr, nr);
+        const cc = Math.min(pc, nc);
+        
+        // Is it top-left to bottom-right?
+        const isTL_BR = (pr === cr && pc === cc) || (nr === cr && nc === cc);
+        const existing = crossings[cr * COLS + cc];
+        
+        // If the opposite diagonal is already occupying this exact 2x2 intersection, block it
+        if (isTL_BR && existing === 2) return false;
+        if (!isTL_BR && existing === 1) return false;
+        
+        return true;
+    }
+
+    function getValidNeighbors(pos, used, crossings, difficulty) {
+        const r = Math.floor(pos / COLS);
+        const c = pos % COLS;
+        const valid = [];
+        for (let dr of [-1, 0, 1]) {
+            for (let dc of [-1, 0, 1]) {
+                if (dr === 0 && dc === 0) continue;
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                    const n = nr * COLS + nc;
+                    if (!used[n] && canConnect(pos, n, crossings, difficulty)) {
+                        valid.push(n);
+                    }
+                }
+            }
+        }
+        return valid;
     }
 
     function doesSpanBoard(path) {
@@ -193,21 +234,27 @@
         return (hasTop && hasBottom) || (hasLeft && hasRight);
     }
 
-    function hasTrappedCell(used, prevPos) {
+    function hasTrappedCell(used, prevPos, difficulty, crossings) {
         const pr = Math.floor(prevPos / COLS);
         const pc = prevPos % COLS;
         for (let i = 0; i < N; i++) {
             if (!used[i]) {
                 const r = Math.floor(i / COLS);
                 const c = i % COLS;
-                if (Math.abs(r - pr) <= 1 && Math.abs(c - pc) <= 1) continue;
+                
+                // If it's a valid next step from prevPos, it's not trapped yet
+                if (Math.abs(r - pr) <= 1 && Math.abs(c - pc) <= 1) {
+                    if (canConnect(prevPos, i, crossings, difficulty)) continue;
+                }
+
                 let hasEmptyNeighbor = false;
                 for (let dr of [-1, 0, 1]) {
                     for (let dc of [-1, 0, 1]) {
                         if (dr === 0 && dc === 0) continue;
                         const nr = r + dr, nc = c + dc;
                         if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
-                            if (!used[nr * COLS + nc]) {
+                            const n = nr * COLS + nc;
+                            if (!used[n] && canConnect(i, n, crossings, difficulty)) {
                                 hasEmptyNeighbor = true;
                                 break;
                             }
@@ -222,7 +269,7 @@
     }
 
     class GridSolver {
-        constructor(words) {
+        constructor(words, difficulty) {
             this.wordObjects = words.map((w, idx) => ({
                 originalIdx: idx,
                 word: w.replace(/\s/g, '').toUpperCase(),
@@ -231,14 +278,18 @@
             this.wordObjects.sort((a, b) => b.word.length - a.word.length);
             this.results = [];
             this.maxResults = 50; 
+            this.difficulty = difficulty;
         }
 
-        solveWithRestarts(maxRestarts = 2000, maxItersPerRestart = 4000) {
+        solveWithRestarts() {
+            const maxRestarts = (this.difficulty !== 'hard') ? 4000 : 2000;
+            const maxItersPerRestart = (this.difficulty !== 'hard') ? 8000 : 4000;
+
             for (let attempt = 0; attempt < maxRestarts; attempt++) {
                 let iterations = 0;
                 let foundPath = null;
 
-                const dfs = (wordIdx, charIdx, currentPath, used, completedPaths) => {
+                const dfs = (wordIdx, charIdx, currentPath, used, crossings, completedPaths) => {
                     if (foundPath || iterations > maxItersPerRestart) return;
                     iterations++;
 
@@ -253,7 +304,7 @@
                     if (charIdx === word.length) {
                         if (wordObj.isSpangram && !doesSpanBoard(currentPath)) return; 
                         completedPaths.push([...currentPath]);
-                        dfs(wordIdx + 1, 0, [], used, completedPaths);
+                        dfs(wordIdx + 1, 0, [], used, crossings, completedPaths);
                         completedPaths.pop();
                         return;
                     }
@@ -266,31 +317,59 @@
                         for (let startPos of available) {
                             used[startPos] = true;
                             currentPath.push(startPos);
-                            dfs(wordIdx, 1, currentPath, used, completedPaths);
+                            dfs(wordIdx, 1, currentPath, used, crossings, completedPaths);
                             currentPath.pop();
                             used[startPos] = false;
                             if (foundPath) return;
                         }
                     } else {
                         const prevPos = currentPath[currentPath.length - 1];
-                        if (hasTrappedCell(used, prevPos)) return;
+                        if (hasTrappedCell(used, prevPos, this.difficulty, crossings)) return;
 
-                        let neighbors = getNeighbors(prevPos);
+                        let neighbors = getValidNeighbors(prevPos, used, crossings, this.difficulty);
                         shuffleArray(neighbors);
 
                         for (let n of neighbors) {
-                            if (!used[n]) {
-                                used[n] = true;
-                                currentPath.push(n);
-                                dfs(wordIdx, charIdx + 1, currentPath, used, completedPaths);
-                                currentPath.pop();
-                                used[n] = false;
-                                if (foundPath) return;
+                            let markedCrossing = false;
+                            let cIdx = -1;
+
+                            // Mark the diagonal crossing intersection for Medium mode
+                            if (this.difficulty === 'medium') {
+                                const pr = Math.floor(prevPos / COLS);
+                                const pc = prevPos % COLS;
+                                const nr = Math.floor(n / COLS);
+                                const nc = n % COLS;
+                                if (Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1) {
+                                    const cr = Math.min(pr, nr);
+                                    const cc = Math.min(pc, nc);
+                                    const isTL_BR = (pr === cr && pc === cc) || (nr === cr && nc === cc);
+                                    cIdx = cr * COLS + cc;
+                                    
+                                    if (!crossings[cIdx]) {
+                                        crossings[cIdx] = isTL_BR ? 1 : 2;
+                                        markedCrossing = true;
+                                    }
+                                }
                             }
+
+                            used[n] = true;
+                            currentPath.push(n);
+                            
+                            dfs(wordIdx, charIdx + 1, currentPath, used, crossings, completedPaths);
+                            
+                            currentPath.pop();
+                            used[n] = false;
+                            
+                            if (markedCrossing) {
+                                crossings[cIdx] = 0;
+                            }
+                            
+                            if (foundPath) return;
                         }
                     }
                 };
-                dfs(0, 0, [], new Array(N).fill(false), []);
+                
+                dfs(0, 0, [], new Array(N).fill(false), new Array(ROWS * COLS).fill(0), []);
 
                 if (foundPath) {
                     let formattedResult = new Array(this.wordObjects.length);
@@ -307,13 +386,13 @@
         }
     }
 
-    // --- State & Rendering Logic ---
     let globalBoards = [];
     let currentBoardIndex = 0;
     let currentAllWords = [];
 
     async function generateBoards() {
         const spangram = document.getElementById('spangram').value;
+        const difficulty = document.getElementById('difficulty').value;
         const themeWords = Array.from(document.querySelectorAll('.theme-word'))
                                 .map(i => i.value)
                                 .filter(v => v.trim() !== "");
@@ -322,7 +401,7 @@
         const btn = document.getElementById('moreBoardsBtn');
         const hint = document.getElementById('flipHint');
         
-        statusMsg.innerText = "Applying NYT rules & crunching variations... please wait.";
+        statusMsg.innerText = "Applying constraints & crunching variations... please wait.";
         document.getElementById('boardsArea').innerHTML = '';
         document.getElementById('outputCode').value = '';
         btn.style.display = 'none';
@@ -330,12 +409,14 @@
 
         setTimeout(() => {
             currentAllWords = [spangram, ...themeWords];
-            const solver = new GridSolver(currentAllWords);
+            const solver = new GridSolver(currentAllWords, difficulty);
             
             solver.solveWithRestarts();
 
             if (solver.results.length === 0) {
-                statusMsg.innerText = "Could not find a grid matching all rules. Try modifying word order or lengths.";
+                statusMsg.innerText = (difficulty !== 'hard') 
+                    ? `Could not find a grid. '${difficulty.charAt(0).toUpperCase() + difficulty.slice(1)}' mode strictly limits shapes, making packing harder. Try modifying lengths or switch to Hard.`
+                    : "Could not find a grid matching all rules. Try modifying word order or lengths.";
                 return;
             }
 
@@ -391,7 +472,6 @@
         const wrapper = document.createElement('div');
         wrapper.className = 'board-wrapper';
         
-        // Base click for selecting the board
         wrapper.onclick = () => selectBoard(wrapper, board);
         
         const cellColors = new Array(48).fill('');
@@ -414,9 +494,8 @@
                 cell.style.backgroundColor = cellColors[i];
                 cell.classList.add('clickable');
                 
-                // Add click event to flip the word
                 cell.onclick = (e) => {
-                    e.stopPropagation(); // Prevent duplicate wrapper click events
+                    e.stopPropagation(); 
                     flipWord(board, i, wrapper);
                 };
             }
@@ -428,25 +507,20 @@
     }
 
     function flipWord(board, cellIndex, wrapper) {
-        // Find which word was clicked
         let targetWord = board.themeWords.find(tw => tw.path.includes(cellIndex));
         if (!targetWord) return;
 
-        // Reverse its path
         targetWord.path.reverse();
 
-        // Reassign the characters to the newly reversed path
         targetWord.path.forEach((gridIdx, charIdx) => {
             board.letters[gridIdx] = targetWord.word[charIdx];
         });
 
-        // Visually update the letters in the UI
         const cells = wrapper.querySelectorAll('.cell');
         board.letters.forEach((letter, i) => {
             cells[i].innerText = letter;
         });
 
-        // Automatically select the board and update the output code to reflect the change
         selectBoard(wrapper, board);
     }
 
@@ -467,7 +541,6 @@
         
         board.themeWords.forEach((tw, idx) => {
             const isLast = idx === board.themeWords.length - 1;
-            // NEW FORMATTING HERE: Everything neatly on one line
             out += `            { "id": ${tw.id}, "word": "${tw.word}", "path": [${tw.path.join(', ')}], "spangram": ${tw.spangram} }${isLast ? '' : ','}\n`;
         });
         
@@ -475,7 +548,6 @@
 
         document.getElementById('outputCode').value = out;
         
-        // Highlight active board
         document.querySelectorAll('.board-wrapper').forEach(w => w.classList.remove('selected'));
         wrapperElement.classList.add('selected');
     }
