@@ -173,7 +173,6 @@
         }
     }
 
-    // Evaluates if two adjacent cells can connect under current difficulty rules
     function canConnect(pos1, pos2, crossings, difficulty) {
         const pr = Math.floor(pos1 / COLS);
         const pc = pos1 % COLS;
@@ -182,20 +181,16 @@
         
         const isDiag = Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1;
         
-        if (difficulty === 'easy') return !isDiag; // No diagonals at all
-        if (difficulty === 'hard') return true;    // Anything goes
+        if (difficulty === 'easy') return !isDiag; 
+        if (difficulty === 'hard') return true;    
         
-        // Medium Mode: Allow diagonal, but block visual intersections
         if (!isDiag) return true;
         
         const cr = Math.min(pr, nr);
         const cc = Math.min(pc, nc);
-        
-        // Is it top-left to bottom-right?
         const isTL_BR = (pr === cr && pc === cc) || (nr === cr && nc === cc);
         const existing = crossings[cr * COLS + cc];
         
-        // If the opposite diagonal is already occupying this exact 2x2 intersection, block it
         if (isTL_BR && existing === 2) return false;
         if (!isTL_BR && existing === 1) return false;
         
@@ -242,7 +237,6 @@
                 const r = Math.floor(i / COLS);
                 const c = i % COLS;
                 
-                // If it's a valid next step from prevPos, it's not trapped yet
                 if (Math.abs(r - pr) <= 1 && Math.abs(c - pc) <= 1) {
                     if (canConnect(prevPos, i, crossings, difficulty)) continue;
                 }
@@ -268,6 +262,29 @@
         return false;
     }
 
+    // --- NEW: Anti-Ambiguity Check ---
+    // Prevents identical letters from touching unless they are sequentially connected in the same word
+    function isValidLetterPlacement(pos, letter, currentPath, gridLetters) {
+        const r = Math.floor(pos / COLS);
+        const c = pos % COLS;
+        for (let dr of [-1, 0, 1]) {
+            for (let dc of [-1, 0, 1]) {
+                if (dr === 0 && dc === 0) continue;
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                    const nx = nr * COLS + nc;
+                    if (gridLetters[nx] === letter) {
+                        const prevPos = currentPath.length > 0 ? currentPath[currentPath.length - 1] : -1;
+                        if (nx !== prevPos) {
+                            return false; // Found an identical letter that IS NOT the direct predecessor!
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     class GridSolver {
         constructor(words, difficulty) {
             this.wordObjects = words.map((w, idx) => ({
@@ -277,19 +294,22 @@
             }));
             this.wordObjects.sort((a, b) => b.word.length - a.word.length);
             this.results = [];
-            this.maxResults = 50; 
+            
+            // Reduced to 20 to account for the heavy computing cost of the anti-ambiguity rules
+            this.maxResults = 20; 
             this.difficulty = difficulty;
         }
 
         solveWithRestarts() {
-            const maxRestarts = (this.difficulty !== 'hard') ? 4000 : 2000;
-            const maxItersPerRestart = (this.difficulty !== 'hard') ? 8000 : 4000;
+            // Increased iteration caps to help it find valid boards with the strict new rules
+            const maxRestarts = (this.difficulty !== 'hard') ? 6000 : 3000;
+            const maxItersPerRestart = (this.difficulty !== 'hard') ? 10000 : 6000;
 
             for (let attempt = 0; attempt < maxRestarts; attempt++) {
                 let iterations = 0;
                 let foundPath = null;
 
-                const dfs = (wordIdx, charIdx, currentPath, used, crossings, completedPaths) => {
+                const dfs = (wordIdx, charIdx, currentPath, used, crossings, completedPaths, gridLetters) => {
                     if (foundPath || iterations > maxItersPerRestart) return;
                     iterations++;
 
@@ -304,7 +324,7 @@
                     if (charIdx === word.length) {
                         if (wordObj.isSpangram && !doesSpanBoard(currentPath)) return; 
                         completedPaths.push([...currentPath]);
-                        dfs(wordIdx + 1, 0, [], used, crossings, completedPaths);
+                        dfs(wordIdx + 1, 0, [], used, crossings, completedPaths, gridLetters);
                         completedPaths.pop();
                         return;
                     }
@@ -315,11 +335,19 @@
                         shuffleArray(available);
 
                         for (let startPos of available) {
+                            // Check ambiguity before placing
+                            if (!isValidLetterPlacement(startPos, word[0], [], gridLetters)) continue;
+
                             used[startPos] = true;
+                            gridLetters[startPos] = word[0];
                             currentPath.push(startPos);
-                            dfs(wordIdx, 1, currentPath, used, crossings, completedPaths);
+                            
+                            dfs(wordIdx, 1, currentPath, used, crossings, completedPaths, gridLetters);
+                            
                             currentPath.pop();
+                            gridLetters[startPos] = null;
                             used[startPos] = false;
+                            
                             if (foundPath) return;
                         }
                     } else {
@@ -330,10 +358,12 @@
                         shuffleArray(neighbors);
 
                         for (let n of neighbors) {
+                            // Check ambiguity before placing
+                            if (!isValidLetterPlacement(n, word[charIdx], currentPath, gridLetters)) continue;
+
                             let markedCrossing = false;
                             let cIdx = -1;
 
-                            // Mark the diagonal crossing intersection for Medium mode
                             if (this.difficulty === 'medium') {
                                 const pr = Math.floor(prevPos / COLS);
                                 const pc = prevPos % COLS;
@@ -353,11 +383,13 @@
                             }
 
                             used[n] = true;
+                            gridLetters[n] = word[charIdx];
                             currentPath.push(n);
                             
-                            dfs(wordIdx, charIdx + 1, currentPath, used, crossings, completedPaths);
+                            dfs(wordIdx, charIdx + 1, currentPath, used, crossings, completedPaths, gridLetters);
                             
                             currentPath.pop();
+                            gridLetters[n] = null;
                             used[n] = false;
                             
                             if (markedCrossing) {
@@ -369,7 +401,7 @@
                     }
                 };
                 
-                dfs(0, 0, [], new Array(N).fill(false), new Array(ROWS * COLS).fill(0), []);
+                dfs(0, 0, [], new Array(N).fill(false), new Array(ROWS * COLS).fill(0), [], new Array(N).fill(null));
 
                 if (foundPath) {
                     let formattedResult = new Array(this.wordObjects.length);
@@ -401,7 +433,7 @@
         const btn = document.getElementById('moreBoardsBtn');
         const hint = document.getElementById('flipHint');
         
-        statusMsg.innerText = "Applying constraints & crunching variations... please wait.";
+        statusMsg.innerText = "Applying strict constraints & crunching variations... please wait.";
         document.getElementById('boardsArea').innerHTML = '';
         document.getElementById('outputCode').value = '';
         btn.style.display = 'none';
@@ -414,9 +446,7 @@
             solver.solveWithRestarts();
 
             if (solver.results.length === 0) {
-                statusMsg.innerText = (difficulty !== 'hard') 
-                    ? `Could not find a grid. '${difficulty.charAt(0).toUpperCase() + difficulty.slice(1)}' mode strictly limits shapes, making packing harder. Try modifying lengths or switch to Hard.`
-                    : "Could not find a grid matching all rules. Try modifying word order or lengths.";
+                statusMsg.innerText = "Could not find a grid matching all rules (Anti-Ambiguity made it too tight). Try modifying lengths, words, or switch to Hard.";
                 return;
             }
 
