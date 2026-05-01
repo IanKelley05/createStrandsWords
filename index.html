@@ -15,13 +15,16 @@
         input[type="text"] { text-transform: uppercase; }
         
         .word-list { margin-bottom: 20px; }
-        button { background: #4f46e5; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button { background: #4f46e5; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }
         button:hover { background: #4338ca; }
         button:disabled { background: #a5b4fc; cursor: not-allowed; }
         .secondary-btn { background: #10b981; margin-left: 10px; }
         .secondary-btn:hover { background: #059669; }
         .delete-btn { background: #ef4444; padding: 8px 12px; }
         .delete-btn:hover { background: #dc2626; }
+        
+        .cancel-btn { background: #ef4444 !important; }
+        .cancel-btn:hover { background: #dc2626 !important; }
         
         .counter { font-size: 1.2em; font-weight: bold; margin-bottom: 20px; }
         .valid { color: green; }
@@ -38,6 +41,10 @@
         
         textarea { width: 100%; height: 300px; font-family: monospace; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; margin-top: 20px; resize: vertical;}
         .hint-text { font-size: 0.9em; color: #6b7280; margin-bottom: 15px; display: block; }
+        
+        /* Persistent Loading Animation */
+        .loading-pulse { animation: pulse 1.5s infinite; color: #ef4444; font-weight: bold; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -73,7 +80,7 @@
 
         <div style="margin-top: 30px;">
             <div class="counter" id="letterCounter">Letters remaining: 48</div>
-            <button id="generateBtn" onclick="generateBoards()" disabled>Scramble & Generate Boards</button>
+            <button id="generateBtn" onclick="toggleGeneration()" disabled>Scramble & Generate Boards</button>
         </div>
     </div>
 
@@ -121,7 +128,7 @@
         
         if (remaining === 0) {
             counter.className = 'counter valid';
-            generateBtn.disabled = false;
+            if (!isGenerating) generateBtn.disabled = false;
         } else if (remaining < 0) {
             counter.className = 'counter invalid';
             generateBtn.disabled = true;
@@ -158,12 +165,14 @@
     }
 
     for(let i=0; i<5; i++) addWordInput();
-
     document.addEventListener('input', (e) => {
         if(e.target.classList.contains('word-input')) updateCount();
     });
 
-    // --- Core Algorithm Logic ---
+    // =======================================================================
+    // --- INFINITE BACKGROUND WEB WORKER ---
+    // =======================================================================
+    const workerCode = `
     const ROWS = 8, COLS = 6, N = 48;
 
     function shuffleArray(array) {
@@ -178,13 +187,10 @@
         const pc = pos1 % COLS;
         const nr = Math.floor(pos2 / COLS);
         const nc = pos2 % COLS;
-        
         const isDiag = Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1;
         
         if (difficulty === 'easy') return !isDiag; 
         if (difficulty === 'hard') return true;    
-        
-        // Medium Mode strict crossing validation
         if (!isDiag) return true;
         
         const cr = Math.min(pr, nr);
@@ -197,7 +203,6 @@
             if (isTL_BR && existing === 2) return false;
             if (!isTL_BR && existing === 1) return false;
         }
-        
         return true;
     }
 
@@ -266,11 +271,9 @@
         return false;
     }
 
-    // --- Strict Anti-Ambiguity Engine ---
-    function isSafeFromAmbiguity(pos, wId, cId, letter, gridLetters, gridWordId, gridCharIdx, wordObjects) {
+    function isSafeFromAmbiguity(pos, wId, cId, letter, gridLetters, gridWordId, gridCharIdx) {
         const r = Math.floor(pos / COLS);
         const c = pos % COLS;
-        const myWord = wordObjects[wId].word;
 
         for (let dr of [-1, 0, 1]) {
             for (let dc of [-1, 0, 1]) {
@@ -278,18 +281,9 @@
                 const nr = r + dr, nc = c + dc;
                 if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
                     const n = nr * COLS + nc;
-                    if (gridLetters[n] !== null) {
-                        const adjLetter = gridLetters[n];
-                        const adjWId = gridWordId[n];
-                        const adjCId = gridCharIdx[n];
-                        const adjWord = wordObjects[adjWId].word;
-
-                        const isMyPredecessor = (adjWId === wId && adjCId === cId - 1);
-
-                        if (adjCId > 0 && adjWord[adjCId - 1] === letter && !isMyPredecessor) return false;
-                        if (adjCId < adjWord.length - 1 && adjWord[adjCId + 1] === letter && !isMyPredecessor) return false;
-                        if (cId > 0 && myWord[cId - 1] === adjLetter && !isMyPredecessor) return false;
-                        if (cId < myWord.length - 1 && myWord[cId + 1] === adjLetter) return false;
+                    if (gridLetters[n] === letter) {
+                        const isMyPredecessor = (gridWordId[n] === wId && gridCharIdx[n] === cId - 1);
+                        if (!isMyPredecessor) return false;
                     }
                 }
             }
@@ -297,195 +291,225 @@
         return true;
     }
 
-    class GridSolver {
-        constructor(words, difficulty) {
-            this.wordObjects = words.map((w, idx) => ({
-                originalIdx: idx,
-                word: w.replace(/\s/g, '').toUpperCase(),
-                isSpangram: idx === 0
-            }));
-            this.wordObjects.sort((a, b) => b.word.length - a.word.length);
-            this.results = [];
-            this.maxResults = 20; 
-            this.difficulty = difficulty;
-        }
+    self.onmessage = function(e) {
+        const { words, difficulty } = e.data;
+        const wordObjects = words.map((w, idx) => ({ originalIdx: idx, word: w.replace(/\\s/g, '').toUpperCase(), isSpangram: idx === 0 }));
+        wordObjects.sort((a, b) => b.word.length - a.word.length);
+        
+        let results = [];
+        const maxResults = 10; 
 
-        solveWithRestarts() {
-            const maxRestarts = 6000;
-            const maxItersPerRestart = 15000;
+        // NO TIME LIMIT. WE GO UNTIL WE FIND IT OR EXHAUST MASSIVE RESTART COUNT.
+        const maxRestarts = 500000; 
+        const maxItersPerRestart = 100000; 
 
-            for (let attempt = 0; attempt < maxRestarts; attempt++) {
-                let iterations = 0;
-                let foundPath = null;
+        let foundPath = null;
 
-                const dfs = (wordIdx, charIdx, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx) => {
-                    if (foundPath || iterations > maxItersPerRestart) return;
-                    iterations++;
+        const dfs = (wordIdx, charIdx, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx, iterations) => {
+            if (foundPath || iterations.count > maxItersPerRestart) return;
+            iterations.count++;
 
-                    if (wordIdx === this.wordObjects.length) {
-                        foundPath = completedPaths.map(p => [...p]);
-                        return;
-                    }
+            if (wordIdx === wordObjects.length) {
+                foundPath = completedPaths.map(p => [...p]);
+                return;
+            }
 
-                    const wordObj = this.wordObjects[wordIdx];
-                    const word = wordObj.word;
+            const wordObj = wordObjects[wordIdx];
+            const word = wordObj.word;
 
-                    if (charIdx === word.length) {
-                        if (wordObj.isSpangram && !doesSpanBoard(currentPath)) return; 
-                        completedPaths.push([...currentPath]);
-                        dfs(wordIdx + 1, 0, [], used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx);
-                        completedPaths.pop();
-                        return;
-                    }
+            if (charIdx === word.length) {
+                if (wordObj.isSpangram && !doesSpanBoard(currentPath)) return; 
+                completedPaths.push([...currentPath]);
+                dfs(wordIdx + 1, 0, [], used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx, iterations);
+                completedPaths.pop();
+                return;
+            }
 
-                    if (charIdx === 0) {
-                        let available = [];
-                        for (let i = 0; i < N; i++) if (!used[i]) available.push(i);
-                        shuffleArray(available);
+            if (charIdx === 0) {
+                let available = [];
+                for (let i = 0; i < N; i++) if (!used[i]) available.push(i);
+                shuffleArray(available);
 
-                        for (let startPos of available) {
-                            if (!isSafeFromAmbiguity(startPos, wordIdx, 0, word[0], gridLetters, gridWordId, gridCharIdx, this.wordObjects)) continue;
+                for (let startPos of available) {
+                    if (!isSafeFromAmbiguity(startPos, wordIdx, 0, word[0], gridLetters, gridWordId, gridCharIdx)) continue;
 
-                            used[startPos] = true;
-                            gridLetters[startPos] = word[0];
-                            gridWordId[startPos] = wordIdx;
-                            gridCharIdx[startPos] = 0;
-                            currentPath.push(startPos);
+                    used[startPos] = true;
+                    gridLetters[startPos] = word[0];
+                    gridWordId[startPos] = wordIdx;
+                    gridCharIdx[startPos] = 0;
+                    currentPath.push(startPos);
+                    
+                    dfs(wordIdx, 1, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx, iterations);
+                    
+                    currentPath.pop();
+                    gridLetters[startPos] = null;
+                    gridWordId[startPos] = null;
+                    gridCharIdx[startPos] = null;
+                    used[startPos] = false;
+                    
+                    if (foundPath) return;
+                }
+            } else {
+                const prevPos = currentPath[currentPath.length - 1];
+                if (hasTrappedCell(used, prevPos, difficulty, crossings)) return;
+
+                let neighbors = getValidNeighbors(prevPos, used, crossings, difficulty);
+                shuffleArray(neighbors);
+
+                for (let n of neighbors) {
+                    if (!isSafeFromAmbiguity(n, wordIdx, charIdx, word[charIdx], gridLetters, gridWordId, gridCharIdx)) continue;
+
+                    let markedCrossing = false;
+                    let cIdx = -1;
+
+                    if (difficulty === 'medium') {
+                        const pr = Math.floor(prevPos / COLS);
+                        const pc = prevPos % COLS;
+                        const nr = Math.floor(n / COLS);
+                        const nc = n % COLS;
+                        if (Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1) {
+                            const cr = Math.min(pr, nr);
+                            const cc = Math.min(pc, nc);
+                            const isTL_BR = (pr === cr && pc === cc) || (nr === cr && nc === cc);
+                            cIdx = cr * COLS + cc;
                             
-                            dfs(wordIdx, 1, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx);
-                            
-                            currentPath.pop();
-                            gridLetters[startPos] = null;
-                            gridWordId[startPos] = null;
-                            gridCharIdx[startPos] = null;
-                            used[startPos] = false;
-                            
-                            if (foundPath) return;
-                        }
-                    } else {
-                        const prevPos = currentPath[currentPath.length - 1];
-                        if (hasTrappedCell(used, prevPos, this.difficulty, crossings)) return;
-
-                        let neighbors = getValidNeighbors(prevPos, used, crossings, this.difficulty);
-                        shuffleArray(neighbors);
-
-                        for (let n of neighbors) {
-                            if (!isSafeFromAmbiguity(n, wordIdx, charIdx, word[charIdx], gridLetters, gridWordId, gridCharIdx, this.wordObjects)) continue;
-
-                            let markedCrossing = false;
-                            let cIdx = -1;
-
-                            if (this.difficulty === 'medium') {
-                                const pr = Math.floor(prevPos / COLS);
-                                const pc = prevPos % COLS;
-                                const nr = Math.floor(n / COLS);
-                                const nc = n % COLS;
-                                if (Math.abs(nr - pr) === 1 && Math.abs(nc - pc) === 1) {
-                                    const cr = Math.min(pr, nr);
-                                    const cc = Math.min(pc, nc);
-                                    const isTL_BR = (pr === cr && pc === cc) || (nr === cr && nc === cc);
-                                    cIdx = cr * COLS + cc;
-                                    
-                                    if (!crossings[cIdx]) {
-                                        crossings[cIdx] = isTL_BR ? 1 : 2;
-                                        markedCrossing = true;
-                                    }
-                                }
+                            if (!crossings[cIdx]) {
+                                crossings[cIdx] = isTL_BR ? 1 : 2;
+                                markedCrossing = true;
                             }
-
-                            used[n] = true;
-                            gridLetters[n] = word[charIdx];
-                            gridWordId[n] = wordIdx;
-                            gridCharIdx[n] = charIdx;
-                            currentPath.push(n);
-                            
-                            dfs(wordIdx, charIdx + 1, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx);
-                            
-                            currentPath.pop();
-                            gridLetters[n] = null;
-                            gridWordId[n] = null;
-                            gridCharIdx[n] = null;
-                            used[n] = false;
-                            
-                            if (markedCrossing) {
-                                crossings[cIdx] = 0;
-                            }
-                            
-                            if (foundPath) return;
                         }
                     }
-                };
-                
-                dfs(0, 0, [], new Array(N).fill(false), new Array(ROWS * COLS).fill(0), [], new Array(N).fill(null), new Array(N).fill(null), new Array(N).fill(null));
 
-                if (foundPath) {
-                    let formattedResult = new Array(this.wordObjects.length);
-                    for (let j = 0; j < this.wordObjects.length; j++) {
-                        formattedResult[this.wordObjects[j].originalIdx] = foundPath[j];
+                    used[n] = true;
+                    gridLetters[n] = word[charIdx];
+                    gridWordId[n] = wordIdx;
+                    gridCharIdx[n] = charIdx;
+                    currentPath.push(n);
+                    
+                    dfs(wordIdx, charIdx + 1, currentPath, used, crossings, completedPaths, gridLetters, gridWordId, gridCharIdx, iterations);
+                    
+                    currentPath.pop();
+                    gridLetters[n] = null;
+                    gridWordId[n] = null;
+                    gridCharIdx[n] = null;
+                    used[n] = false;
+                    
+                    if (markedCrossing) {
+                        crossings[cIdx] = 0;
                     }
-                    const resString = JSON.stringify(formattedResult);
-                    if (!this.results.some(r => JSON.stringify(r) === resString)) {
-                        this.results.push(formattedResult);
-                    }
-                    if (this.results.length >= this.maxResults) break;
+                    if (foundPath) return;
                 }
             }
-        }
-    }
+        };
 
+        for (let attempt = 0; attempt < maxRestarts; attempt++) {
+            foundPath = null;
+            let iterTracker = { count: 0 };
+            dfs(0, 0, [], new Array(N).fill(false), new Array(ROWS * COLS).fill(0), [], new Array(N).fill(null), new Array(N).fill(null), new Array(N).fill(null), iterTracker);
+            
+            if (foundPath) {
+                let formattedResult = new Array(wordObjects.length);
+                for (let j = 0; j < wordObjects.length; j++) {
+                    formattedResult[wordObjects[j].originalIdx] = foundPath[j];
+                }
+                const resString = JSON.stringify(formattedResult);
+                if (!results.some(r => JSON.stringify(r) === resString)) {
+                    results.push(formattedResult);
+                }
+                if (results.length >= maxResults) break;
+            }
+        }
+
+        self.postMessage({ results: results, exhausted: results.length === 0 });
+    };
+    `;
+
+    // =======================================================================
+    // --- UI & WORKER MANAGEMENT ---
+    // =======================================================================
+    let engineWorker;
+    let isGenerating = false;
     let globalBoards = [];
     let currentBoardIndex = 0;
     let currentAllWords = [];
 
-    async function generateBoards() {
-        const spangram = document.getElementById('spangram').value;
-        const difficulty = document.getElementById('difficulty').value;
-        const themeWords = Array.from(document.querySelectorAll('.theme-word'))
-                                .map(i => i.value)
-                                .filter(v => v.trim() !== "");
+    function initWorker() {
+        if (engineWorker) engineWorker.terminate();
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        engineWorker = new Worker(URL.createObjectURL(blob));
 
-        const statusMsg = document.getElementById('statusMsg');
-        const btn = document.getElementById('moreBoardsBtn');
-        const hint = document.getElementById('flipHint');
-        
-        statusMsg.innerText = "Running strict ambiguity checks & generating boards... please wait.";
-        document.getElementById('boardsArea').innerHTML = '';
-        document.getElementById('outputCode').value = '';
-        btn.style.display = 'none';
-        hint.style.display = 'none';
-
-        setTimeout(() => {
-            currentAllWords = [spangram, ...themeWords];
-            const solver = new GridSolver(currentAllWords, difficulty);
+        engineWorker.onmessage = function(e) {
+            isGenerating = false;
+            generateBtn.innerText = "Scramble & Generate Boards";
+            generateBtn.classList.remove('cancel-btn');
             
-            solver.solveWithRestarts();
-
-            if (solver.results.length === 0) {
-                statusMsg.innerText = "Could not find a valid grid matching all rules without creating an ambiguity. Try editing word lengths or swapping out a word.";
+            const statusMsg = document.getElementById('statusMsg');
+            const btn = document.getElementById('moreBoardsBtn');
+            const hint = document.getElementById('flipHint');
+            
+            if (e.data.exhausted) {
+                statusMsg.className = "invalid";
+                statusMsg.innerText = "Search Exhausted. Millions of combinations checked, but your words physically cannot fit together on a 6x8 grid under these rules.";
                 return;
             }
 
-            globalBoards = solver.results.map(paths => {
+            statusMsg.className = "";
+            globalBoards = e.data.results.map(paths => {
                 const boardData = { letters: new Array(48).fill(""), themeWords: [] };
                 paths.forEach((path, i) => {
                     const wordStr = currentAllWords[i].replace(/\s/g, '').toUpperCase();
                     path.forEach((gridIdx, charIdx) => {
                         boardData.letters[gridIdx] = wordStr[charIdx];
                     });
-                    boardData.themeWords.push({
-                        id: i,
-                        word: wordStr,
-                        path: path,
-                        spangram: (i === 0)
-                    });
+                    boardData.themeWords.push({ id: i, word: wordStr, path: path, spangram: (i === 0) });
                 });
                 return boardData;
             });
 
             currentBoardIndex = 0;
             renderCurrentPage();
+        };
+    }
 
-        }, 50);
+    // Initialize worker on load
+    initWorker();
+
+    function toggleGeneration() {
+        const statusMsg = document.getElementById('statusMsg');
+        const btn = document.getElementById('moreBoardsBtn');
+        const hint = document.getElementById('flipHint');
+
+        // IF RUNNING -> CANCEL IT
+        if (isGenerating) {
+            initWorker(); // Terminates the current infinite loop and resets
+            isGenerating = false;
+            generateBtn.innerText = "Scramble & Generate Boards";
+            generateBtn.classList.remove('cancel-btn');
+            statusMsg.className = "invalid";
+            statusMsg.innerText = "Search manually cancelled by user.";
+            return;
+        }
+
+        // IF NOT RUNNING -> START IT
+        const spangram = document.getElementById('spangram').value;
+        const difficulty = document.getElementById('difficulty').value;
+        const themeWords = Array.from(document.querySelectorAll('.theme-word'))
+                                .map(i => i.value)
+                                .filter(v => v.trim() !== "");
+
+        isGenerating = true;
+        generateBtn.innerText = "Terminate Search (Kill Switch)";
+        generateBtn.classList.add('cancel-btn');
+        
+        statusMsg.className = "loading-pulse";
+        statusMsg.innerText = "Running infinite mathematical search. Fans may spin. Click the red button below to cancel at any time.";
+        document.getElementById('boardsArea').innerHTML = '';
+        document.getElementById('outputCode').value = '';
+        btn.style.display = 'none';
+        hint.style.display = 'none';
+
+        currentAllWords = [spangram, ...themeWords];
+        engineWorker.postMessage({ words: currentAllWords, difficulty: difficulty });
     }
 
     function renderCurrentPage() {
@@ -501,7 +525,7 @@
         boardsToShow.forEach(board => renderBoard(board, area));
 
         let endIdx = Math.min(currentBoardIndex + 5, globalBoards.length);
-        statusMsg.innerText = `Showing ${currentBoardIndex + 1}-${endIdx} of ${globalBoards.length} found valid variations.`;
+        statusMsg.innerText = `Showing ${currentBoardIndex + 1}-${endIdx} of ${globalBoards.length} valid variations found.`;
         
         if (globalBoards.length > 0) hint.style.display = 'block';
         if (globalBoards.length > 5) btn.style.display = 'inline-block';
@@ -516,7 +540,6 @@
     function renderBoard(board, container) {
         const wrapper = document.createElement('div');
         wrapper.className = 'board-wrapper';
-        
         wrapper.onclick = () => selectBoard(wrapper, board);
         
         const cellColors = new Array(48).fill('');
@@ -538,7 +561,6 @@
             if (cellColors[i]) {
                 cell.style.backgroundColor = cellColors[i];
                 cell.classList.add('clickable');
-                
                 cell.onclick = (e) => {
                     e.stopPropagation(); 
                     flipWord(board, i, wrapper);
@@ -554,18 +576,14 @@
     function flipWord(board, cellIndex, wrapper) {
         let targetWord = board.themeWords.find(tw => tw.path.includes(cellIndex));
         if (!targetWord) return;
-
         targetWord.path.reverse();
-
         targetWord.path.forEach((gridIdx, charIdx) => {
             board.letters[gridIdx] = targetWord.word[charIdx];
         });
-
         const cells = wrapper.querySelectorAll('.cell');
         board.letters.forEach((letter, i) => {
             cells[i].innerText = letter;
         });
-
         selectBoard(wrapper, board);
     }
 
@@ -576,23 +594,19 @@
         let out = `    "${dateStr}": {\n`;
         out += `        "title": "${currentPuzzleTitle}",\n`;
         out += `        "letters": [\n`;
-        
         for (let i = 0; i < board.letters.length; i+=6) {
             let row = board.letters.slice(i, i+6).map(l => `"${l}"`).join(', ');
             out += `            ${row}${i < 42 ? ',' : ''}\n`;
         }
         out += `        ],\n`;
         out += `        "themeWords": [\n`;
-        
         board.themeWords.forEach((tw, idx) => {
             const isLast = idx === board.themeWords.length - 1;
             out += `            { "id": ${tw.id}, "word": "${tw.word}", "path": [${tw.path.join(', ')}], "spangram": ${tw.spangram} }${isLast ? '' : ','}\n`;
         });
-        
         out += `        ]\n    }`;
 
         document.getElementById('outputCode').value = out;
-        
         document.querySelectorAll('.board-wrapper').forEach(w => w.classList.remove('selected'));
         wrapperElement.classList.add('selected');
     }
